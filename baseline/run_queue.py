@@ -68,7 +68,13 @@ def main():
     ap.add_argument("--cpus", default=None,
                     help="comma list of logical CPUs; each job is pinned to one free CPU and --workers "
                          "becomes the list length (use the performance cores on a hybrid CPU)")
+    ap.add_argument("--share-dir", default=None,
+                    help="folder where queues running at the same time publish their memory reservations, "
+                         "so each counts the others' jobs that are still growing (default: next to the task list)")
     a = ap.parse_args()
+    share = Path(a.share_dir or Path(a.tasks).parent / "queue_share")
+    share.mkdir(parents=True, exist_ok=True)
+    mine = share / (Path(a.tasks).stem + ".json")
     cpus = [int(c) for c in a.cpus.split(",")] if a.cpus else None
     if cpus:
         a.workers = len(cpus)
@@ -129,9 +135,20 @@ def main():
         # Start jobs while there are free workers and commit headroom.
         heavy_running = any(r["task"].get("heavy") for r in running.values())
         used, _ = commit_gb()
-        # Running jobs still growing toward their estimated peak keep that headroom reserved.
-        used += sum(max(0.0, r["task"].get("est_gb", 1.0) - tree_private_bytes(r["ps"]) / 2**30)
-                    for r in running.values())
+        # Running jobs still growing toward their estimated peak keep that headroom reserved,
+        # this queue's and (through the share folder) every other queue's.
+        reserved = sum(max(0.0, r["task"].get("est_gb", 1.0) - tree_private_bytes(r["ps"]) / 2**30)
+                       for r in running.values())
+        mine.write_text(json.dumps({"reserved_gb": reserved, "time": time.time()}))
+        for f in share.glob("*.json"):
+            if f != mine:
+                try:
+                    o = json.loads(f.read_text())
+                    if time.time() - o["time"] < 120:
+                        used += o["reserved_gb"]
+                except (OSError, ValueError, KeyError):
+                    pass
+        used += reserved
         for t in list(todo):
             if len(running) >= a.workers:
                 break
@@ -152,14 +169,17 @@ def main():
             running[t["id"]] = {"proc": proc, "ps": ps, "task": t, "start": time.time(), "peak": 0, "cpu": cpu}
             todo.remove(t)
             used += t.get("est_gb", 1.0)
+            reserved += t.get("est_gb", 1.0)
             heavy_running = heavy_running or t.get("heavy", False)
             print(f"{now()} start {t['id']}", flush=True)
+        mine.write_text(json.dumps({"reserved_gb": reserved, "time": time.time()}))
 
         if a.status and time.time() - last_status > a.status_every * 60:
             status_line()
             last_status = time.time()
         time.sleep(5)
 
+    mine.write_text(json.dumps({"reserved_gb": 0.0, "time": time.time()}))
     status_line("| queue finished")
 
 
