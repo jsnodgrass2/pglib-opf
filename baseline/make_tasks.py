@@ -34,10 +34,17 @@ CPLEX_MODELS = ["DCP", "LPAC", "SOC", "QC"]
 AC_FAMILY = {"ACP", "ACR", "IVR", "QC", "PF_IPOPT"}
 
 
-def est_gb(model, buses):
-    """Rough commit estimate per job (GB); replaced by measured peaks after the sample."""
-    per_bus = 2.5e-4 if model in AC_FAMILY else 1.0e-4
-    return round(1.0 + per_bus * buses, 1)
+# Peak commit (GB) measured on Texas (7,336 buses) in the 2026-10-14 sample; Eastern ACP measured 14.2 GB
+# against Texas 2.0 GB, i.e. peak ~ (buses / 7336) ** 0.83. Unmeasured pairs use the Ipopt value.
+TEXAS_PEAK = {("ACP", "ipopt"): 2.0, ("ACR", "ipopt"): 1.6, ("IVR", "ipopt"): 2.3, ("DCP", "ipopt"): 0.7,
+              ("LPAC", "ipopt"): 1.5, ("SOC", "ipopt"): 1.6, ("QC", "ipopt"): 3.1, ("PF_IPOPT", "ipopt"): 2.0,
+              ("DCP", "gurobi"): 0.6, ("SOC", "gurobi"): 0.9, ("QC", "gurobi"): 1.3, ("ACR", "gurobi"): 0.9,
+              ("DCP", "highs"): 0.6, ("PF_NR", "native"): 1.0}
+
+
+def est_gb(model, solver, buses):
+    peak = TEXAS_PEAK.get((model, solver), TEXAS_PEAK.get((model, "ipopt"), 2.0))
+    return round(max(0.8, peak * (buses / 7336) ** 0.83), 1)
 
 
 def task(cases_dir, results_dir, setname, name, rel, buses, model, solver):
@@ -48,7 +55,9 @@ def task(cases_dir, results_dir, setname, name, rel, buses, model, solver):
         "case": str(Path(cases_dir) / rel), "model": model, "solver": solver,
         "out": str(out), "log": str(out.with_suffix(".log")),
         "time_limit": 28800 if big else 7200, "threads": 1,
-        "heavy": big and model in AC_FAMILY, "est_gb": est_gb(model, buses),
+        "heavy": big and model in AC_FAMILY, "est_gb": est_gb(model, solver, buses), "big": big,
+        # Gurobi's NL barrier on the largest case runs after everything else (Q2 A, 2026-10-14).
+        "priority": 1 if big and solver == "gurobi" and model in ("ACP", "ACR", "IVR") else 0,
     }
 
 
@@ -87,6 +96,16 @@ def main():
                       for m in IPOPT_MODELS + ["PF_IPOPT"]]
     else:
         sys.exit(f"unknown plan {plan}")
+    if plan == "epigrids":
+        # Two queues: the performance-core queue times the release set and holds every job on the
+        # largest case (so they share one memory guard); the efficiency-core queue takes the rest.
+        p = [t for t in T if t["id"].startswith("release/") or t["big"]]
+        e = [t for t in T if t not in p]
+        for suffix, part in (("_pcore", p), ("_ecore", e)):
+            f = Path(out).with_name(Path(out).stem + suffix + ".json")
+            f.write_text(json.dumps(part, indent=1))
+            print(f"{len(part)} tasks -> {f}")
+        return
     Path(out).write_text(json.dumps(T, indent=1))
     print(f"{len(T)} tasks -> {out}")
 

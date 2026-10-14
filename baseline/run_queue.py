@@ -80,8 +80,8 @@ def main():
         return p.exists() and json.loads(p.read_text()).get("termination_status") != "CRASHED"
 
     todo = [t for t in tasks if not finished(t)]
-    # Longest first: heavy jobs, then by estimated memory (a proxy for size).
-    todo.sort(key=lambda t: (not t.get("heavy", False), -t.get("est_gb", 0.0)))
+    # Priority 0 before 1; within it longest first: heavy jobs, then by estimated memory (a proxy for size).
+    todo.sort(key=lambda t: (t.get("priority", 0), not t.get("heavy", False), -t.get("est_gb", 0.0)))
     total, skipped = len(tasks), len(tasks) - len(todo)
     print(f"{now()} {total} tasks, {skipped} already done, {len(todo)} to run, workers={a.workers}", flush=True)
 
@@ -129,6 +129,9 @@ def main():
         # Start jobs while there are free workers and commit headroom.
         heavy_running = any(r["task"].get("heavy") for r in running.values())
         used, _ = commit_gb()
+        # Running jobs still growing toward their estimated peak keep that headroom reserved.
+        used += sum(max(0.0, r["task"].get("est_gb", 1.0) - tree_private_bytes(r["ps"]) / 2**30)
+                    for r in running.values())
         for t in list(todo):
             if len(running) >= a.workers:
                 break
