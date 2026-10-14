@@ -1,0 +1,8 @@
+# Code only in this folder. Results stay outside the repository until the paper is accepted.
+results/
+logs/
+*.json
+!tasks_example.json
+*.csv
+*.log
+*.tmp
