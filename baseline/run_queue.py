@@ -86,8 +86,11 @@ def main():
         return p.exists() and json.loads(p.read_text()).get("termination_status") != "CRASHED"
 
     todo = [t for t in tasks if not finished(t)]
-    # Priority 0 before 1; within it longest first: heavy jobs, then by estimated memory (a proxy for size).
-    todo.sort(key=lambda t: (t.get("priority", 0), not t.get("heavy", False), -t.get("est_gb", 0.0)))
+    # Priority 0 before 1. Within it: the heavy chain first (one at a time), then the smaller cases
+    # largest first, then the other jobs on the largest case. Those run beside the long heavy chain
+    # instead of filling the memory budget at the start and leaving cores idle.
+    todo.sort(key=lambda t: (t.get("priority", 0), not t.get("heavy", False), t.get("big", False),
+                             -t.get("est_gb", 0.0)))
     total, skipped = len(tasks), len(tasks) - len(todo)
     print(f"{now()} {total} tasks, {skipped} already done, {len(todo)} to run, workers={a.workers}", flush=True)
 
@@ -135,6 +138,12 @@ def main():
         # Start jobs while there are free workers and commit headroom.
         heavy_running = any(r["task"].get("heavy") for r in running.values())
         used, _ = commit_gb()
+        # The cap can be changed while queues run: write a number (GB) to <share>/cap_gb.txt.
+        cap = a.commit_cap_gb
+        try:
+            cap = float((share / "cap_gb.txt").read_text())
+        except (OSError, ValueError):
+            pass
         # Running jobs still growing toward their estimated peak keep that headroom reserved,
         # this queue's and (through the share folder) every other queue's.
         reserved = sum(max(0.0, r["task"].get("est_gb", 1.0) - tree_private_bytes(r["ps"]) / 2**30)
@@ -154,7 +163,7 @@ def main():
                 break
             if t.get("heavy") and heavy_running:
                 continue
-            if used + t.get("est_gb", 1.0) > a.commit_cap_gb:
+            if used + t.get("est_gb", 1.0) > cap:
                 continue
             Path(t["log"]).parent.mkdir(parents=True, exist_ok=True)
             logf = open(t["log"], "w", encoding="utf-8")
